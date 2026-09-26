@@ -1,0 +1,118 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+# The base image's own packages are recorded first so they can be left out of
+# runtime-deps; every image built from this list starts from the same base.
+RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      autoconf \
+      automake \
+      build-essential \
+      libcurl4-openssl-dev \
+      libtool \
+      pkgconf \
+      xz-utils \
+      zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://mediaarea.net/download/binary/mediainfo/${VERSION}/MediaInfo_CLI_${VERSION}_GNU_FromSource.tar.xz /src/
+WORKDIR /src/mediainfo
+RUN tar -xJf "/src/MediaInfo_CLI_${VERSION}_GNU_FromSource.tar.xz" --strip-components=1
+
+# The configure scripts and the other files autotools generates are not in
+# upstream's git repositories, so the archive's copies are deleted and made
+# again from configure.ac and Makefile.am, as upstream's autogen.sh does.
+# Shared/ only holds a script that downloads and builds zlib.
+RUN set -eu; \
+    rm -rf Shared; \
+    for dir in ZenLib/Project/GNU/Library MediaInfoLib/Project/GNU/Library MediaInfo/Project/GNU/CLI; do \
+      for f in autom4te.cache aclocal.m4 compile config.guess config.sub configure depcomp \
+          install-sh ltmain.sh Makefile.in missing test-driver test/Makefile.in; do \
+        rm -rf "/src/mediainfo/$dir/$f"; \
+      done; \
+      autoreconf -fi "/src/mediainfo/$dir"; \
+    done
+
+# The tarball holds ZenLib and MediaInfoLib next to the command-line tool.
+# They are built as static libraries and linked into the mediainfo binary,
+# as upstream's CLI_Compile.sh does. --with-libcurl lets mediainfo read URLs.
+ARG JOBS
+WORKDIR /src/mediainfo/ZenLib/Project/GNU/Library
+RUN set -eu; \
+    ./configure --enable-static --disable-shared; \
+    make -j"${JOBS:-$(nproc)}"
+WORKDIR /src/mediainfo/MediaInfoLib/Project/GNU/Library
+RUN set -eu; \
+    ./configure --enable-static --disable-shared --with-libcurl | tee /tmp/configure-mediainfolib.txt; \
+    make -j"${JOBS:-$(nproc)}"
+WORKDIR /src/mediainfo/MediaInfo/Project/GNU/CLI
+RUN set -eu; \
+    ./configure --prefix=/usr/local --enable-staticlibs | tee /tmp/configure-cli.txt; \
+    make -j"${JOBS:-$(nproc)}"; \
+    make install-strip DESTDIR=/out
+
+ARG BASE_IMAGE
+# configure falls back to other choices without failing, so its summary is
+# checked here.
+# runtime-deps lists the packages that own the libraries the binary loads,
+# minus the base image's packages, plus the packages in runtime-deps.ubuntu.
+WORKDIR /src/mediainfo
+RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    cat /tmp/configure-mediainfolib.txt /tmp/configure-cli.txt | tr -s ' ' > /tmp/configure-summary; \
+    for line in 'Using libcurl? system' 'Using zlib? system' 'Using tinyxml2? internal' \
+        'Using libzen? builtin (static)' 'Using libmediainfo? builtin (static)'; do \
+      grep -Fxq -- " $line" /tmp/configure-summary || { cat /tmp/configure-summary >&2; echo "missing: $line" >&2; exit 1; }; \
+    done; \
+    meta=/out/usr/local/share/randomcontainers/mediainfo; \
+    mkdir -p "$meta/licenses"; \
+    cp MediaInfo/LICENSE "$meta/licenses/LICENSE.MediaInfo"; \
+    cp MediaInfoLib/LICENSE "$meta/licenses/LICENSE.MediaInfoLib"; \
+    cp ZenLib/License.txt "$meta/licenses/LICENSE.ZenLib"; \
+    for f in aes-gladman/aescrypt.c fmt/format.h hmac-gladman/hmac.c md5/md5.c sha1-gladman/sha1.c \
+        sha2-gladman/sha2.c tfsxml/tfsxml.c tinyxml2/tinyxml2.cpp; do \
+      awk '/\/\*/ { c = 1 } c { print } c && /\*\// { exit }' "MediaInfoLib/Source/ThirdParty/$f" > "$meta/licenses/NOTICE.${f%%/*}"; \
+      test -s "$meta/licenses/NOTICE.${f%%/*}"; \
+    done; \
+    awk '/^\/\// { print; next } { exit }' MediaInfoLib/Source/ThirdParty/base64/base64.h > "$meta/licenses/NOTICE.base64"; \
+    test -s "$meta/licenses/NOTICE.base64"; \
+    echo "${VERSION}" > "$meta/version"; \
+    echo "https://mediaarea.net/download/binary/mediainfo/${VERSION}/MediaInfo_CLI_${VERSION}_GNU_FromSource.tar.xz" > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(c++ --version | head -n 1)"; \
+      echo "autotools: $(autoconf --version | head -n 1), $(automake --version | head -n 1), $(libtoolize --version | head -n 1)"; \
+      grep -F ' Using ' /tmp/configure-summary; \
+      /out/usr/local/bin/mediainfo --Version; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+      | xargs -0 ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | sort -u | comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/mediainfo/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "mediainfo"]
+CMD ["--help"]
