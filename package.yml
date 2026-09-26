@@ -1,0 +1,139 @@
+name: mediainfo
+title: MediaInfo
+summary: Reports the technical and tag data of video and audio files, such as codecs, bit rates, HDR formats and subtitle tracks, as text, JSON or XML.
+homepage: https://mediaarea.net/en/MediaInfo
+# MediaInfo and MediaInfoLib, and what the source release compiles into the
+# binary with them: ZenLib and tinyxml2 (Zlib), fmt and tfsxml (MIT), and
+# Brian Gladman's AES, SHA and HMAC code. MediaInfoLib's base64.h carries no
+# license statement, so no term here covers it.
+license: BSD-2-Clause AND Zlib AND MIT AND Brian-Gladman-2-Clause AND Brian-Gladman-3-Clause
+upstream:
+  source: github-release
+  repository: MediaArea/MediaInfo
+  # Release tags look like v26.05, with the occasional point release such as v24.01.1.
+  tag-pattern: '^v(\d{2}\.\d{2}(?:\.\d+)?)$'
+  version-template: '{1}'
+  versioning: loose
+  version: "26.05"
+  # MediaArea publishes no checksums or signatures for this archive, so each
+  # new version is pinned by hand, after its sources are compared with git:
+  # MediaInfo and MediaInfoLib with their v<version> tags, and ZenLib, which
+  # has had no release since 0.4.41, with the MediaArea/ZenLib commit it was
+  # taken from. The archive's generated autotools files are not in git; the
+  # build deletes them and runs autoreconf.
+  # ZenLib in 26.05: 65458b340378ecfddd0fa14359a3c57c79257b3d (master)
+  artifact:
+    url: https://mediaarea.net/download/binary/mediainfo/{version}/MediaInfo_CLI_{version}_GNU_FromSource.tar.xz
+    sha256: 220e54edc92a559cf8c2b4e332eba0116f9f758b2588ea02d432d1894a569c6a
+image:
+  entrypoint: [mediainfo]
+  cmd: [--help]
+test:
+  - |
+    mediainfo --Version > version.txt
+    grep -Fxq "MediaInfoLib - v$VERSION" version.txt
+  - |
+    # ZenLib, MediaInfoLib and tinyxml2 are linked in statically; libcurl comes from the distro.
+    ldd /usr/local/bin/mediainfo > ldd.txt 2>&1
+    grep -q 'libcurl\.so' ldd.txt
+    if grep -Eq 'not found|Error|libzen|libmediainfo|libtinyxml2' ldd.txt; then cat ldd.txt >&2; exit 1; fi
+  - |
+    check() {
+      got="$(mediainfo --Output="$2" "$1")"
+      [ "$got" = "$3" ] || { echo "$1 $2: expected '$3', got '$got'" >&2; exit 1; }
+    }
+    # One second of 8 kHz 16-bit mono silence.
+    {
+      printf 'RIFF\244\076\000\000WAVEfmt \020\000\000\000\001\000\001\000'
+      printf '\100\037\000\000\200\076\000\000\002\000\020\000data\200\076\000\000'
+      head -c 16000 /dev/zero
+    } > silence.wav
+    check silence.wav 'General;%Format% %Duration/String3%' 'Wave 00:00:01.000'
+    check silence.wav 'Audio;%Format% %Channel(s)% %SamplingRate% %BitDepth%' 'PCM 1 8000 16'
+    mediainfo --Output=JSON silence.wav > silence.json
+    grep -Fq "\"name\":\"MediaInfoLib\",\"version\":\"$VERSION\"" silence.json
+    grep -Fq '"@type":"Audio"' silence.json
+    mediainfo --Output=XML silence.wav > silence.xml
+    grep -Fq '<Format>Wave</Format>' silence.xml
+    # Any argument containing :// is read through libcurl.
+    check "file://$PWD/silence.wav" 'Audio;%Format% %SamplingRate%' 'PCM 8000'
+  - |
+    check() {
+      got="$(mediainfo --Output="$2" "$1")"
+      [ "$got" = "$3" ] || { echo "$1 $2: expected '$3', got '$got'" >&2; exit 1; }
+    }
+    # Five black 16x16 frames in a YUV4MPEG2 stream.
+    {
+      printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\n'
+      i=0
+      while [ "$i" -lt 5 ]; do printf 'FRAME\n'; head -c 384 /dev/zero; i=$((i + 1)); done
+    } > frames.y4m
+    check frames.y4m 'General;%Format%' YUV4MPEG2
+    check frames.y4m 'Video;%Format% %Width%x%Height% %FrameRate% %ChromaSubsampling% %FrameCount%' 'YUV 16x16 25.000 4:2:0 5'
+    # 40 silent MPEG-1 Layer III frames: 128 kb/s, 44.1 kHz, mono, 417 bytes each.
+    i=0
+    while [ "$i" -lt 40 ]; do printf '\377\373\220\300'; head -c 413 /dev/zero; i=$((i + 1)); done > silence.mp3
+    check silence.mp3 'Audio;%Format% %Format_Profile% %SamplingRate% %Channel(s)%' 'MPEG Audio Layer 3 44100 1'
+  - |
+    # TTML is parsed with the bundled tinyxml2.
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body><div>' \
+      '<p begin="00:00:00.000" end="00:00:01.000">one</p>' \
+      '<p begin="00:00:01.000" end="00:00:02.000">two</p>' \
+      '</div></body></tt>' > subtitles.ttml
+    mediainfo --Output=XML subtitles.ttml > subtitles.xml
+    grep -Fq '<track type="Text"' subtitles.xml
+    test "$(mediainfo --Output='Text;%Format%' subtitles.ttml)" = TTML
+examples:
+  - title: Show the technical data of a video file
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/mediainfo input.mkv
+  - title: Write the full report as JSON
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/mediainfo --Output=JSON input.mp4 > input.json
+  - title: Print the resolution and frame rate of the video track
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/mediainfo --Output='Video;%Width%x%Height% %FrameRate% fps' input.mp4
+  - title: Read a file over HTTPS without downloading all of it
+    command: docker run --rm ghcr.io/randomcontainers/mediainfo https://example.com/video.mp4
+  - title: Measure the picture inside black borders with FFmpeg (default image)
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/mediainfo --Enable_FFmpeg=1 --Output='Video;%Active_Width%x%Active_Height%' input.mkv
+combos:
+  - with: [ffmpeg]
+    default: true
+    base: ffmpeg
+    summary: MediaInfo with FFmpeg, for checking files with both mediainfo and ffprobe and for measuring black borders.
+    test:
+      - |
+        export SVT_LOG=1
+        run() { ffmpeg -hide_banner -loglevel error -y "$@"; }
+        check() {
+          got="$(mediainfo --Output="$2" "$1")"
+          [ "$got" = "$3" ] || { echo "$1 $2: expected '$3', got '$got'" >&2; exit 1; }
+        }
+        v=testsrc2=size=320x240:rate=25:duration=2
+        a=sine=frequency=1000:duration=2
+        run -f lavfi -i "$v" -f lavfi -i "$a" -c:v libx264 -c:a aac h264.mp4
+        run -f lavfi -i "$v" -f lavfi -i "$a" -c:v libx265 -x265-params log-level=error -c:a libopus hevc.mkv
+        run -f lavfi -i "$v" -f lavfi -i "$a" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libvorbis vp9.webm
+        run -f lavfi -i "$v" -f lavfi -i "$a" -c:v libx264 -c:a mp2 stream.ts
+        run -f lavfi -i "$v" -frames:v 2 -c:v libsvtav1 -preset 8 av1.mkv
+        while read -r file container video audio; do
+          check "$file" 'General;%Format%' "$container"
+          check "$file" 'Video;%Format% %Width%x%Height%' "$video 320x240"
+          check "$file" 'Audio;%Format%' "$audio"
+        done <<'EOF'
+        h264.mp4 MPEG-4 AVC AAC
+        hevc.mkv Matroska HEVC Opus
+        vp9.webm WebM VP9 Vorbis
+        stream.ts MPEG-TS AVC MPEG Audio
+        EOF
+        check av1.mkv 'Video;%Format% %Width%x%Height%' 'AV1 320x240'
+        frames="$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 h264.mp4)"
+        check h264.mp4 'Video;%FrameCount% %FrameRate%' "$frames 25.000"
+      - |
+        # With --Enable_FFmpeg=1, mediainfo runs ffmpeg's cropdetect filter and
+        # reports the size of the picture inside black borders.
+        ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=white:size=240x180:rate=25:duration=2 \
+          -vf pad=320:240:40:30:black -pix_fmt yuv420p -c:v ffv1 letterbox.mkv
+        mediainfo --Output='Video;%Format% %Width%x%Height%' letterbox.mkv > letterbox.txt
+        grep -Fxq 'FFV1 320x240' letterbox.txt || { cat letterbox.txt >&2; exit 1; }
+        mediainfo --Enable_FFmpeg=1 --Output='Video;%Active_Width%x%Active_Height%' letterbox.mkv > active.txt
+        grep -Fxq '240x180' active.txt || { cat active.txt >&2; exit 1; }
