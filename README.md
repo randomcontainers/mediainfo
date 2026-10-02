@@ -11,8 +11,6 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
   ghcr.io/randomcontainers/mediainfo input.mkv
 ```
 
-The same images can also be pulled as `randomcontainers.com/mediainfo`.
-
 Write the full report as JSON. `--Output=XML` gives MediaArea's XML format instead:
 
 ```sh
