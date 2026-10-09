@@ -14,17 +14,17 @@ upstream:
   tag-pattern: '^v(\d{2}\.\d{2}(?:\.\d+)?)$'
   version-template: '{1}'
   versioning: loose
-  version: "26.05"
+  version: "26.10"
   # MediaArea publishes no checksums or signatures for this archive, so each
   # new version is pinned by hand, after its sources are compared with git:
   # MediaInfo and MediaInfoLib with their v<version> tags, and ZenLib, which
   # has had no release since 0.4.41, with the MediaArea/ZenLib commit it was
   # taken from. The archive's generated autotools files are not in git; the
   # build deletes them and runs autoreconf.
-  # ZenLib in 26.05: 65458b340378ecfddd0fa14359a3c57c79257b3d (master)
+  # ZenLib in 26.10: 07c0ef8a121e025fbb27388c28291447c379bf35 (master)
   artifact:
     url: https://mediaarea.net/download/binary/mediainfo/{version}/MediaInfo_CLI_{version}_GNU_FromSource.tar.xz
-    sha256: 220e54edc92a559cf8c2b4e332eba0116f9f758b2588ea02d432d1894a569c6a
+    sha256: 7785bb75d69efd21b7c0b2c2269164aeb21cea2be6f6b9103ad79743af6fdec7
 image:
   entrypoint: [mediainfo]
   cmd: [--help]
